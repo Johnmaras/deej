@@ -83,7 +83,7 @@ If you've actually gone ahead and built it, here's how you can run `deej`:
 
 ### Requirements
 
-- Python 2.7.x (Sorry!) and `pip`
+- Python 3.9 and `pip`
 - `virtualenv`
 
 ### Installation
@@ -99,7 +99,11 @@ If you've actually gone ahead and built it, here's how you can run `deej`:
 
 ## Missing stuff
 
-- Better logging and error handling
-- Automatic COM port detection
-- Mic input support
-- Feel free to let me know if there's more demand for other features!
+- [ ] Better logging and error handling
+- [ ] Automatic COM port detection
+- [ ] Fix deej disconnecting when unplugging and re-plugging the console
+- [ ] Make deej forgiving on non-vital config issues
+- [ ] Mic input support
+- [ ] Control current process
+- [ ] Support for mute/unmute buttons
+- [ ] Support monitors

@@ -10,6 +10,7 @@ import psutil
 
 import infi.systray
 import serial
+import serial.tools.list_ports
 import yaml
 
 from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
@@ -18,10 +19,15 @@ from comtypes import CLSCTX_ALL, GUID
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
+from helpers.logging import get_logger
+
+PAIR_TOKEN = "ThisIsDeej"
+PAIR_DEVICE_TIME_WINDOW = 10
+
 
 class Deej(object):
 
-    def __init__(self,):
+    def __init__(self, ):
         self._config_filename = 'config.yaml'
         self._config_directory = os.path.dirname(os.path.abspath(__file__))
 
@@ -32,7 +38,7 @@ class Deej(object):
 
         self._settings = None
 
-        self._load_settings()
+        # self.load_settings()
 
         self._sessions = None
         self._master_session = None
@@ -46,6 +52,8 @@ class Deej(object):
         self._stopped = False
 
         self._lpcguid = pointer(GUID.create_new())
+
+        self._logger = None
 
     def initialize(self):
         self._refresh_sessions()
@@ -88,15 +96,18 @@ class Deej(object):
                 continue
 
             # split on '|'
-            split_line = line.split('|')
-
+            split_line = line.split(b'|')
 
             if len(split_line) != self._expected_num_sliders:
                 attempt_print('Uh oh - mismatch between number of sliders and config')
                 continue
 
             # now they're ints between 0 and 1023
-            parsed_values = [int(n) for n in split_line]
+            try:
+                parsed_values = [int(n) for n in split_line]
+            except ValueError as e:
+                # Suppose we only get ValueError on message "ThisIsDeej"
+                continue
 
             # now they're floats between 0 and 1 (but kinda dirty: 0.12334)
             normalized_values = [n / 1023.0 for n in parsed_values]
@@ -108,7 +119,10 @@ class Deej(object):
                 self._slider_values = clean_values
                 self._apply_volume_changes()
 
-    def _load_settings(self, reload=False):
+    def setup_logger(self, debug=False):
+        self._logger = get_logger("deej", std_out=debug)
+
+    def load_settings(self, reload=False):
         settings = None
 
         try:
@@ -127,18 +141,73 @@ class Deej(object):
 
         try:
             self._expected_num_sliders = len(settings['slider_mapping'])
-            self._com_port = settings['com_port']
+            # self._com_port = settings['com_port']
             self._baud_rate = settings['baud_rate']
 
             self._slider_values = [0] * self._expected_num_sliders
 
             self._settings = settings
         except Exception as error:
-            attempt_print('Failed to {0}load configuration, please ensure it matches' \
-                ' the required format. Error: {1}'.format('re' if reload else '', error))
+            attempt_print(
+                f'Failed to {"re" if reload else ""}load configuration, please ensure it matches the required format. Error: {error}')
 
         if reload:
             attempt_print('Reloaded configuration successfully')
+
+    def pair_device(self):
+        comports = serial.tools.list_ports.comports()
+        flag = True
+        start = time.perf_counter()
+        while flag and time.perf_counter() - start < PAIR_DEVICE_TIME_WINDOW:
+            for port, desc, hwid in comports:
+                if str(desc).find("Arduino Uno") != -1:
+                    self._logger.info(f"Device found on port {port}")
+                    self._com_port = port
+                    flag = False
+                    break
+
+                    # TODO Make it read the token
+                    # ser = serial.Serial()
+                    # ser.baudrate = self._baud_rate
+                    # ser.port = port
+                    # if ser.readable():
+                    #     ser.open()
+                    #
+                    # line = ser.readline()
+                    # if line == PAIR_TOKEN:
+                    #     self._logger.info(f"Device found on port {port}")
+                    #     self._com_port = port
+                    #     flag = False
+                    #     break
+                    # else:
+                    #     self._logger.warning(f"Found on port {port} but token is wrong of missing! {line}")
+
+                else:
+                    self._logger.debug(f"Not on port {port}")
+
+            # try:
+            #     ser = serial.Serial()
+            #     ser.baudrate = self._baud_rate
+            #     ser.port = port
+            #     if ser.readable():
+            #         ser.open()
+            #     else:
+            #         continue
+            #
+            #     # ensure we start clean
+            #     line = ser.readline()
+            #
+            #     if line == PAIR_TOKEN:
+            #         self._logger.info(f"Device found on port {port}")
+            #         self._com_port = port
+            #         flag = False
+            #         break
+            #     else:
+            #         self._logger.debug(f"Not on port {port}")
+            # except Exception:
+            #     self._logger.exception(f"Got an exception when reading port {port}")
+            #     continue
+        self._logger.warning("Couldn't pair device")
 
     def _watch_config_file_changes(self):
 
@@ -148,7 +217,7 @@ class Deej(object):
             def on_modified(event):
                 if event.src_path.endswith(self._config_filename):
                     attempt_print('Detected config file changes, re-loading')
-                    self._load_settings(reload=True)
+                    self.load_settings(reload=True)
 
         self._config_observer = Observer()
         self._config_observer.schedule(LogfileModifiedHandler(),
@@ -160,7 +229,8 @@ class Deej(object):
     def _refresh_sessions(self):
 
         # only do this if enough time passed since we last scanned for processes
-        if self._last_session_refresh and time.time() - self._last_session_refresh < self._settings['process_refresh_frequency']:
+        if self._last_session_refresh and time.time() - self._last_session_refresh < self._settings[
+            'process_refresh_frequency']:
             return
 
         self._last_session_refresh = time.time()
@@ -205,7 +275,7 @@ class Deej(object):
         return False
 
     def _apply_volume_changes(self):
-        for slider_idx, targets in self._settings['slider_mapping'].iteritems():
+        for slider_idx, targets in self._settings['slider_mapping'].items():
 
             slider_value = self._slider_values[slider_idx]
             target_found = False
@@ -213,7 +283,6 @@ class Deej(object):
             # normalize single target values
             if type(targets) is not list:
                 targets = [targets]
-
 
             # first determine if the target is a currently active session:
             for target in targets:
@@ -237,7 +306,6 @@ class Deej(object):
                             # if this fails while we're in the background - nobody cares!!!!!
                             attempt_print('{0}: {1} => {2}'.format(session_name, current_volume, slider_value))
 
-
             # if we weren't able to find an audio session for this slider,
             # maybe we aren't aware of that process yet. better check
             if not target_found:
@@ -248,7 +316,7 @@ class Deej(object):
         if name == 'master':
             return [('Master', self._master_session)]
 
-        for process_name, process_sessions in self._sessions.iteritems():
+        for process_name, process_sessions in self._sessions.items():
             if process_name.lower() == name.lower():
 
                 # if we only have one session for that process return it
@@ -256,7 +324,8 @@ class Deej(object):
                     return [(process_name, process_sessions[0])]
 
                 # if we have more, number them for logging and stuff
-                return [('{0} ({1})'.format(process_name, idx), session) for idx, session in enumerate(process_sessions)]
+                return [('{0} ({1})'.format(process_name, idx), session) for idx, session in
+                        enumerate(process_sessions)]
 
         return []
 
@@ -276,9 +345,10 @@ class Deej(object):
         return math.floor(value * 100) / 100.0
 
 
-def setup_tray(edit_config_callback, refresh_sessions_callback, stop_callback):
+def setup_tray(edit_config_callback, refresh_sessions_callback, stop_callback, pair_device_callback):
     menu_options = (('Edit configuration', None, lambda _: edit_config_callback()),
-                    ('Re-scan audio sessions', None, lambda _: refresh_sessions_callback()))
+                    ('Re-scan audio sessions', None, lambda _: refresh_sessions_callback()),
+                    ('Pair device', None, lambda _: pair_device_callback()))
 
     tray = infi.systray.SysTrayIcon('assets/logo.ico', 'deej', menu_options, on_quit=lambda _: stop_callback())
     tray.start()
@@ -288,7 +358,7 @@ def setup_tray(edit_config_callback, refresh_sessions_callback, stop_callback):
 
 def attempt_print(s):
     try:
-        print s
+        print(s)
     except:
         pass
 
@@ -302,9 +372,14 @@ def spawn_detached_notepad(filename):
 def main():
     deej = Deej()
 
+    deej.load_settings()
+    deej.setup_logger(True)
+
     try:
         deej.initialize()
-        tray = setup_tray(deej.edit_config, deej.queue_session_refresh, deej.stop)
+        tray = setup_tray(deej.edit_config, deej.queue_session_refresh, deej.stop, deej.pair_device)
+
+        deej.pair_device()
 
         deej.start()
 
@@ -312,16 +387,17 @@ def main():
         attempt_print('Interrupted.')
         sys.exit(130)
     except Exception as error:
-        filename = 'deej-{0}.log'.format(datetime.datetime.now().strftime('%Y.%m.%d-%H.%M.%S'))
-
-        with open(filename, 'w') as f:
-            import traceback
-            f.write('Unfortunately, deej has crashed. This really shouldn\'t happen!\n')
-            f.write('If you\'ve just encountered this, please contact @omriharel and attach this error log.\n')
-            f.write('You can also join the deej Discord server at https://discord.gg/nf88NJu.\n')
-            f.write('Exception occurred: {0}\nTraceback: {1}'.format(error, traceback.format_exc()))
-
-        spawn_detached_notepad(filename)
+        # filename = 'deej-{0}.log'.format(datetime.datetime.now().strftime('%Y.%m.%d-%H.%M.%S'))
+        #
+        # with open(filename, 'w') as f:
+        #     import traceback
+        #     f.write('Unfortunately, deej has crashed. This really shouldn\'t happen!\n')
+        #     f.write('If you\'ve just encountered this, please contact @omriharel and attach this error log.\n')
+        #     f.write('You can also join the deej Discord server at https://discord.gg/nf88NJu.\n')
+        #     f.write('Exception occurred: {0}\nTraceback: {1}'.format(error, traceback.format_exc()))
+        #
+        # spawn_detached_notepad(filename)
+        raise error
         sys.exit(1)
     finally:
         tray.shutdown()
