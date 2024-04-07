@@ -1,17 +1,16 @@
-#!/usr/bin/env python
-
 import sys
 import math
 import time
-import datetime
 import os
 import subprocess
+
 import psutil
 
 import infi.systray
 import serial
 import serial.tools.list_ports
 import yaml
+from notifypy import Notify
 
 from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
 from ctypes import POINTER, pointer, cast
@@ -23,6 +22,9 @@ from helpers.logging import get_logger
 
 PAIR_TOKEN = "ThisIsDeej"
 PAIR_DEVICE_TIME_WINDOW = 10
+
+app_name = "Deej"
+app_logo = "assets/logo.ico"
 
 
 class Deej(object):
@@ -51,9 +53,13 @@ class Deej(object):
         self._config_observer = None
         self._stopped = False
 
+        self.device_paired = False
+        self.pair_message_reset = True
+
         self._lpcguid = pointer(GUID.create_new())
 
         self._logger = None
+        self._notifications = None
 
     def initialize(self):
         self._refresh_sessions()
@@ -80,6 +86,8 @@ class Deej(object):
 
         # ensure we start clean
         ser.readline()
+
+        self.pair_message_reset = True
 
         while not self._stopped:
 
@@ -122,6 +130,19 @@ class Deej(object):
     def setup_logger(self, debug=False):
         self._logger = get_logger("deej", std_out=debug)
 
+    def setup_notifications(self):
+        self._notifications = Notify()
+
+    def notify(self, message, title="Deej Sound Console", urgency="normal"):
+        if self._notifications:
+            self._notifications.title = title
+            self._notifications.message = message
+            self._notifications.urgency = urgency
+            self._notifications.timeout = 5
+            self._notifications.application_name = "Deej"
+            self._notifications.icon = "assets/logo.ico"
+            self._notifications.send(block=False)
+
     def load_settings(self, reload=False):
         settings = None
 
@@ -154,59 +175,49 @@ class Deej(object):
         if reload:
             attempt_print('Reloaded configuration successfully')
 
-    def pair_device(self):
+    def pair_device(self, pair_with_token=False):
         comports = serial.tools.list_ports.comports()
         flag = True
         start = time.perf_counter()
         while flag and time.perf_counter() - start < PAIR_DEVICE_TIME_WINDOW:
             for port, desc, hwid in comports:
                 if str(desc).find("Arduino Uno") != -1:
-                    self._logger.info(f"Device found on port {port}")
-                    self._com_port = port
-                    flag = False
-                    break
+                    if not pair_with_token:
+                        message = f"Paired with device on port {port}"
+                        self._logger.info(message)
+                        self._com_port = port
+                        self.device_paired = True
 
-                    # TODO Make it read the token
-                    # ser = serial.Serial()
-                    # ser.baudrate = self._baud_rate
-                    # ser.port = port
-                    # if ser.readable():
-                    #     ser.open()
-                    #
-                    # line = ser.readline()
-                    # if line == PAIR_TOKEN:
-                    #     self._logger.info(f"Device found on port {port}")
-                    #     self._com_port = port
-                    #     flag = False
-                    #     break
-                    # else:
-                    #     self._logger.warning(f"Found on port {port} but token is wrong of missing! {line}")
+                        self.notify(message)
+                        return
+                    else:
+                        # TODO Make it read the token
+                        try:
+                            ser = serial.Serial()
+                            ser.baudrate = self._baud_rate
+                            ser.port = port
+                            if ser.readable():
+                                ser.open()
+
+                            line = ser.readline()
+                        except Exception as e:
+                            self._logger.exception(f"Got an exception when reading port {port}")
+                            break
+                        if line == PAIR_TOKEN:
+                            message = f"Paired with device on port {port} using token authentication"
+                            self._logger.info(message)
+                            self._com_port = port
+                            self.device_paired = True
+                            self.notify(message)
+                            ser.close()
+                            del ser
+                            return
+                        else:
+                            self._logger.warning(f"Found on port {port} but token is wrong or missing! {line}")
 
                 else:
                     self._logger.debug(f"Not on port {port}")
 
-            # try:
-            #     ser = serial.Serial()
-            #     ser.baudrate = self._baud_rate
-            #     ser.port = port
-            #     if ser.readable():
-            #         ser.open()
-            #     else:
-            #         continue
-            #
-            #     # ensure we start clean
-            #     line = ser.readline()
-            #
-            #     if line == PAIR_TOKEN:
-            #         self._logger.info(f"Device found on port {port}")
-            #         self._com_port = port
-            #         flag = False
-            #         break
-            #     else:
-            #         self._logger.debug(f"Not on port {port}")
-            # except Exception:
-            #     self._logger.exception(f"Got an exception when reading port {port}")
-            #     continue
         self._logger.warning("Couldn't pair device")
 
     def _watch_config_file_changes(self):
@@ -374,6 +385,7 @@ def main():
 
     deej.load_settings()
     deej.setup_logger(True)
+    deej.setup_notifications()
 
     try:
         deej.initialize()
@@ -381,7 +393,16 @@ def main():
 
         deej.pair_device()
 
-        deej.start()
+        while True:
+
+            if deej.device_paired:
+                deej.start()
+            else:
+                if deej.pair_message_reset:
+                    deej.notify("Deej Sound Console",
+                                "Not paired with a device. Please try pairing from the tray menu.")
+                    deej.pair_message_reset = False
+
 
     except KeyboardInterrupt:
         attempt_print('Interrupted.')

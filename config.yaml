@@ -2,7 +2,7 @@
 # you can use 'master' to indicate the master channel, or a list of process names to create a group
 slider_mapping:
 #  1: chrome.exe
-  0: chrome.exe
+  0: master
 #  2: spotify.exe
 #  3:
 #    - pathofexile_x64.exe
